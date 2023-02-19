@@ -8,6 +8,7 @@ from uer.utils.tokenizers import *
 from uer.utils.misc import count_lines
 from uer.utils.seed import set_seed
 from uer.utils.mask import mask_seq
+import pkuseg
 
 
 def merge_dataset(dataset_path, workers_num):
@@ -51,6 +52,7 @@ class Dataset(object):
         self.seed = args.seed
         self.dynamic_masking = args.dynamic_masking
         self.whole_word_masking = args.whole_word_masking
+        self.dict_path = args.dict_path
         self.span_masking = args.span_masking
         self.span_geo_prob = args.span_geo_prob
         self.span_max_length = args.span_max_length
@@ -228,6 +230,7 @@ class MlmDataset(Dataset):
     def __init__(self, args, vocab, tokenizer):
         super(MlmDataset, self).__init__(args, vocab, tokenizer)
         self.full_sentences = args.full_sentences
+        self.seg = pkuseg.pkuseg(model_name = "default", user_dict = self.dict_path, postag = False)
 
     def worker(self, proc_id, start, end):
         print("Worker %d is building dataset ... " % proc_id)
@@ -236,7 +239,7 @@ class MlmDataset(Dataset):
         docs_buffer = []
         for _ in range(self.dup_factor):
             pos = 0
-            with open(self.corpus_path, mode="r", encoding="utf-8") as f:
+            with open(self.corpus_path, mode="r", encoding="utf-8") as f: 
                 while pos < start:
                     f.readline()
                     pos += 1
@@ -292,7 +295,7 @@ class MlmDataset(Dataset):
             seg_pos = [len(src)]
 
             if not self.dynamic_masking:
-                src, tgt = mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
+                src, tgt = self.mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
                 instance = ((src, 0), tgt, seg_pos)
             else:
                 instance = ((src, 0), seg_pos)
@@ -309,14 +312,164 @@ class MlmDataset(Dataset):
         pad_num = self.seq_length - len(src)
         
         if not self.dynamic_masking:
-            src, tgt = mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
+            src, tgt = self.mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
             instance = ((src, pad_num), tgt, seg_pos)
         else:
             instance = ((src, pad_num), seg_pos)
 
         instances.append(instance)
         return instances
+    
+    def mask_seq(self, src, tokenizer, whole_word_masking, span_masking, span_geo_prob, span_max_length):
+        vocab = tokenizer.vocab
+        PAD_ID = vocab.get(PAD_TOKEN)
+        for i in range(len(src) - 1, -1, -1):
+            if src[i] != PAD_ID:
+                break
+        src_no_pad = src[:i + 1]
 
+        # 这里会通过jieba的分词得到该文本的token_index，[[0,3],[3,2]] [[start_idx, length], [start_idx, length]]
+        tokens_index, src_no_pad = self.create_index(src_no_pad, tokenizer, whole_word_masking, span_masking, span_geo_prob, span_max_length)
+        if len(src_no_pad) < len(src):
+            src = src_no_pad + (len(src) - len(src_no_pad)) * [PAD_ID]
+        else:
+            src = src_no_pad
+
+        random.shuffle(tokens_index)
+        num_to_predict = max(1, int(round(len(src_no_pad) * 0.15)))
+        tgt_mlm = []
+        for index_set in tokens_index:
+            if len(tgt_mlm) >= num_to_predict:
+                break
+            if whole_word_masking:
+                i = index_set[0]
+                mask_len = index_set[1]
+                if len(tgt_mlm) + mask_len > num_to_predict:
+                    continue
+
+                for j in range(mask_len):
+                    token = src[i + j]
+                    tgt_mlm.append((i + j, token))
+                    prob = random.random()
+                    # 这里mask的机制和原生的bert有区别：
+                    # 原生的mask是对该词组下的每一个idx进行单独的mask
+                    # 这里的mask是对该词组做为一个整体，进行整体的替换
+                    if prob < 0.8:
+                        src[i + j] = vocab.get(MASK_TOKEN)
+                    elif prob < 0.9:
+                        while True:
+                            rdi = random.randint(1, len(vocab) - 1)
+                            if rdi not in [vocab.get(CLS_TOKEN), vocab.get(SEP_TOKEN), vocab.get(MASK_TOKEN), PAD_ID]:
+                                break
+                        src[i + j] = rdi
+            elif span_masking:
+                i = index_set[0]
+                span_len = index_set[1]
+                if len(tgt_mlm) + span_len > num_to_predict:
+                    continue
+
+                for j in range(span_len):
+                    token = src[i + j]
+                    tgt_mlm.append((i + j, token))
+                prob = random.random()
+                if prob < 0.8:
+                    for j in range(span_len):
+                        src[i + j] = vocab.get(MASK_TOKEN)
+                elif prob < 0.9:
+                    for j in range(span_len):
+                        while True:
+                            rdi = random.randint(1, len(vocab) - 1)
+                            if rdi not in [vocab.get(CLS_TOKEN), vocab.get(SEP_TOKEN), vocab.get(MASK_TOKEN), PAD_ID]:
+                                break
+                        src[i + j] = rdi
+            else:
+                i = index_set[0]
+                token = src[i]
+                tgt_mlm.append((i, token))
+                prob = random.random()
+                if prob < 0.8:
+                    src[i] = vocab.get(MASK_TOKEN)
+                elif prob < 0.9:
+                    while True:
+                        rdi = random.randint(1, len(vocab) - 1)
+                        if rdi not in [vocab.get(CLS_TOKEN), vocab.get(SEP_TOKEN), vocab.get(MASK_TOKEN), PAD_ID]:
+                            break
+                    src[i] = rdi
+        tgt_mlm = sorted(tgt_mlm, key=lambda x: x[0])
+        return src, tgt_mlm
+
+
+    def create_index(self, src, tokenizer, whole_word_masking, span_masking, span_geo_prob, span_max_length):
+        tokens_index = []
+        span_end_position = -1
+        vocab = tokenizer.vocab
+        PAD_ID = vocab.get(PAD_TOKEN)
+        if whole_word_masking:
+            # 用来保存该句的index，和src的差别目前知道的是多一个index为101的[CLS]
+            src_wwm = []
+            src_length = len(src)
+            has_cls, has_sep = False, False
+            if src[0] == vocab.get(CLS_TOKEN):
+                src = src[1:]
+                has_cls = True
+            if src[-1] == vocab.get(SEP_TOKEN):
+                src = src[:-1]
+                has_sep = True
+            sentence = "".join(tokenizer.convert_ids_to_tokens(src)).replace('[UNK]', '').replace('##', '')
+            # 需要改动的代码就只有这一块，感觉有点简单哈哈哈
+            # import jieba as seg
+            
+            wordlist = self.seg.cut(sentence)
+            if has_cls:
+                src_wwm += [vocab.get(CLS_TOKEN)]
+            # 使用jieba的分词结果，然后将原文本进行分词，用idx的方式保存下来
+            for word in wordlist:
+                position = len(src_wwm)
+                src_wwm += tokenizer.convert_tokens_to_ids(tokenizer.tokenize(word))
+                if len(src_wwm) < src_length:
+                    # 每次保存一个词的起始位置和他的长度
+                    tokens_index.append([position, len(src_wwm)-position])
+            if has_sep:
+                src_wwm += [vocab.get(SEP_TOKEN)]
+            if len(src_wwm) > src_length:
+                src = src_wwm[:src_length]
+            else:
+                src = src_wwm
+        else:
+            for (i, token) in enumerate(src):
+                if token == vocab.get(CLS_TOKEN) or token == vocab.get(SEP_TOKEN) or token == PAD_ID:
+                    continue
+                if not span_masking:
+                    tokens_index.append([i])
+                else:
+                    if i < span_end_position:
+                        continue
+                    span_len = self.get_span_len(span_max_length, span_geo_prob)
+                    span_end_position = i + span_len
+                    if span_end_position > len(src):
+                        span_len = len(src) - i
+                    tokens_index.append([i, span_len])
+        return tokens_index, src
+
+
+    def get_span_len(self, max_span_len, p):
+        geo_prob_cum = [0.0]
+        geo_prob = 1.0
+        for i in range(max_span_len + 1):
+            if i == 0:
+                continue
+            if i == 1:
+                geo_prob *= p
+                geo_prob_cum.append(geo_prob_cum[-1] + geo_prob)
+            else:
+                geo_prob *= (1 - p)
+                geo_prob_cum.append(geo_prob_cum[-1] + geo_prob)
+
+        prob = geo_prob_cum[-1] * random.random()
+        for i in range(len(geo_prob_cum) - 1):
+            if prob >= geo_prob_cum[i] and prob < geo_prob_cum[i + 1]:
+                current_span_len = i + 1
+        return current_span_len
 
 class AlbertDataset(Dataset):
     """
@@ -416,7 +569,7 @@ class AlbertDataset(Dataset):
                         pad_num = self.seq_length - len(src)
 
                     if not self.dynamic_masking:
-                        src, tgt_mlm = mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
+                        src, tgt_mlm = mask_seq(src, self.tokenizer, self.whole_word_masking, self.dict_path, self.span_masking, self.span_geo_prob, self.span_max_length)
                         src = (src, pad_num)
                         instance = (src, tgt_mlm, is_wrong_order, seg_pos)
                     else:

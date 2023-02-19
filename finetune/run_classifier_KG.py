@@ -1,15 +1,7 @@
 """
 This script provides an example to wrap UER-py for classification.
 """
-import sys
-import os
-import random
-import argparse
-import torch
-import torch.nn as nn
 
-uer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(uer_dir)
 
 from uer.embeddings import *
 from uer.encoders import *
@@ -24,36 +16,55 @@ from uer.utils.misc import pooling
 from uer.model_saver import save_model
 from uer.opts import finetune_opts, tokenizer_opts, adv_opts
 
+import sys
+import os
+import random
+import argparse
+import torch
+import torch.nn as nn
+
+uer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(uer_dir)
+
 
 class Classifier(nn.Module):
     def __init__(self, args):
         super(Classifier, self).__init__()
         # 如果是BERT, 那就会有word pos seg三个embedding，都是用的nn.embedding初始化
-        self.embedding = str2embedding[args.embedding](args, len(args.tokenizer.vocab))
-        self.encoder = str2encoder[args.encoder](args)
+        self.bert_embedding = str2embedding[args.embedding](args, len(args.tokenizer.vocab))
+        self.kg_embedding = str2embedding[args.kg_embedding](args, len(args.tokenizer.vocab))
+        self.bert_encoder = str2encoder[args.encoder](args)
         self.labels_num = args.labels_num
         self.pooling_type = args.pooling
         self.soft_targets = args.soft_targets
         self.soft_alpha = args.soft_alpha
-        self.output_layer_1 = nn.Linear(args.hidden_size, args.hidden_size)
-        self.output_layer_2 = nn.Linear(args.hidden_size, self.labels_num)
+        self.output_layer_1 = nn.Linear(args.hidden_size + args.kg_emb_size, args.hidden_size + args.kg_emb_size)
+        self.output_layer_2 = nn.Linear(args.hidden_size + args.kg_emb_size, self.labels_num)
 
-    def forward(self, src, tgt, seg, soft_tgt=None):
+    def forward(self, src, tgt, seg, kg, soft_tgt=None):
         """
         Args:
             src: [batch_size x seq_length]
             tgt: [batch_size]
             seg: [batch_size x seq_length]
+            kg: [batch_size x seq_length]
         """
         # Embedding.
-        emb = self.embedding(src, seg)
+        emb = self.bert_embedding(src, seg)
         # Encoder.
         # 如果要拿的话，应该在这里截断
-        output = self.encoder(emb, seg)
+        output = self.bert_encoder(emb, seg)
         # Target.
-        output = pooling(output, seg, self.pooling_type)
+        bert_emb = pooling(output, seg, self.pooling_type)
+        kg_emb = self.kg_embedding(kg)
+        # mean 处理一下
+        kg_emb = torch.sum(kg_emb, dim=1)
+        kg_emb = torch.div(kg_emb, len(kg_emb))
+        # kg_emb = [self.kg_embedding[x] for x in kg]
+        # kg_emb = torch.stack([torch.sum(x, dim=0) / len(x) for x in kg_emb],0).to(bert_emb.device)
         # 如果要接kg的emb的话，应该就是在这里接
         # **********************************************
+        output = torch.cat((bert_emb, kg_emb), -1)
         output = torch.tanh(self.output_layer_1(output))
         logits = self.output_layer_2(output)
         if tgt is not None:
@@ -113,27 +124,28 @@ def build_optimizer(args, model):
     return optimizer, scheduler
 
 
-def batch_loader(batch_size, src, tgt, seg, soft_tgt=None):
+def batch_loader(batch_size, src, tgt, seg, kg, soft_tgt=None):
     instances_num = src.size()[0]
     for i in range(instances_num // batch_size):
         src_batch = src[i * batch_size : (i + 1) * batch_size, :]
         tgt_batch = tgt[i * batch_size : (i + 1) * batch_size]
         seg_batch = seg[i * batch_size : (i + 1) * batch_size, :]
+        kg_batch = kg[i * batch_size : (i + 1) * batch_size, :]
         if soft_tgt is not None:
             soft_tgt_batch = soft_tgt[i * batch_size : (i + 1) * batch_size, :]
-            yield src_batch, tgt_batch, seg_batch, soft_tgt_batch
+            yield src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch
         else:
-            yield src_batch, tgt_batch, seg_batch, None
+            yield src_batch, tgt_batch, seg_batch, kg_batch, None
     if instances_num > instances_num // batch_size * batch_size:
         src_batch = src[instances_num // batch_size * batch_size :, :]
         tgt_batch = tgt[instances_num // batch_size * batch_size :]
         seg_batch = seg[instances_num // batch_size * batch_size :, :]
+        kg_batch = kg[instances_num // batch_size * batch_size :, :]
         if soft_tgt is not None:
             soft_tgt_batch = soft_tgt[instances_num // batch_size * batch_size :, :]
-            yield src_batch, tgt_batch, seg_batch, soft_tgt_batch
+            yield src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch
         else:
-            yield src_batch, tgt_batch, seg_batch, None
-
+            yield src_batch, tgt_batch, seg_batch, kg_batch, None
 
 def read_dataset(args, path):
     dataset, columns = [], {}
@@ -150,6 +162,7 @@ def read_dataset(args, path):
             if "text_b" not in columns:  # Sentence classification.
                 text_a = line[columns["text_a"]]
                 src = args.tokenizer.convert_tokens_to_ids([CLS_TOKEN] + args.tokenizer.tokenize(text_a) + [SEP_TOKEN])
+                kg = [int(i) for i in line[columns["ent_list"]].split(',')]
                 seg = [1] * len(src)
             else:  # Sentence-pair classification.
                 text_a, text_b = line[columns["text_a"]], line[columns["text_b"]]
@@ -165,24 +178,31 @@ def read_dataset(args, path):
             while len(src) < args.seq_length:
                 src.append(PAD_ID)
                 seg.append(0)
+
+            if len(kg) > 10:
+                kg = kg[: 10]
+            while len(kg) < 10:
+                kg.append(PAD_ID)
+
             if args.soft_targets and "logits" in columns.keys():
-                dataset.append((src, tgt, seg, soft_tgt))
+                dataset.append((src, tgt, seg, kg, soft_tgt))
             else:
-                dataset.append((src, tgt, seg))
+                dataset.append((src, tgt, seg, kg))
 
     return dataset
 
 
-def train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch=None):
+def train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch=None):
     model.zero_grad()
 
     src_batch = src_batch.to(args.device)
     tgt_batch = tgt_batch.to(args.device)
     seg_batch = seg_batch.to(args.device)
+    kg_batch = kg_batch.to(args.device)
     if soft_tgt_batch is not None:
         soft_tgt_batch = soft_tgt_batch.to(args.device)
 
-    loss, _ = model(src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+    loss, _ = model(src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch)
     if torch.cuda.device_count() > 1:
         loss = torch.mean(loss)
 
@@ -194,7 +214,7 @@ def train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_bat
 
     if args.use_adv and args.adv_type == "fgm":
         args.adv_method.attack(epsilon=args.fgm_epsilon)
-        loss_adv, _ = model(src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+        loss_adv, _ = model(src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch)
         if torch.cuda.device_count() > 1:
             loss_adv = torch.mean(loss_adv)
         loss_adv.backward()
@@ -211,7 +231,7 @@ def train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_bat
                 model.zero_grad()
             else:
                 args.adv_method.restore_grad()
-            loss_adv, _ = model(src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+            loss_adv, _ = model(src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch)
             if torch.cuda.device_count() > 1:
                 loss_adv = torch.mean(loss_adv)
             loss_adv.backward()
@@ -227,6 +247,8 @@ def evaluate(args, dataset, report_log=True):
     src = torch.LongTensor([sample[0] for sample in dataset])
     tgt = torch.LongTensor([sample[1] for sample in dataset])
     seg = torch.LongTensor([sample[2] for sample in dataset])
+    kg = torch.LongTensor([sample[3] for sample in dataset])
+    # kg = [sample[3] for sample in dataset]
 
     batch_size = args.batch_size
 
@@ -236,12 +258,13 @@ def evaluate(args, dataset, report_log=True):
 
     args.model.eval()
 
-    for i, (src_batch, tgt_batch, seg_batch, _) in enumerate(batch_loader(batch_size, src, tgt, seg)):
+    for i, (src_batch, tgt_batch, seg_batch, kg_batch, _) in enumerate(batch_loader(batch_size, src, tgt, seg, kg)):
         src_batch = src_batch.to(args.device)
         tgt_batch = tgt_batch.to(args.device)
         seg_batch = seg_batch.to(args.device)
+        kg_batch = kg_batch.to(args.device)
         with torch.no_grad():
-            _, logits = args.model(src_batch, tgt_batch, seg_batch)
+            _, logits = args.model(src_batch, tgt_batch, seg_batch, kg_batch)
         pred = torch.argmax(nn.Softmax(dim=1)(logits), dim=1)
         gold = tgt_batch
         for j in range(pred.size()[0]):
@@ -276,6 +299,12 @@ def main():
                         help="Train model with logits.")
     parser.add_argument("--soft_alpha", type=float, default=0.5,
                         help="Weight of the soft targets loss.")
+    parser.add_argument("--kg_emb_path",type=str,
+                        help="Path of the kg embeddings.")
+    parser.add_argument("--kg_embedding",type=str,
+                        help="Type of the kg embeddings.")
+    parser.add_argument("--kg_emb_size",type=int,
+                        help="Dimensions of the kg embeddings.")
 
     adv_opts(parser)
 
@@ -303,8 +332,8 @@ def main():
     model = model.to(args.device)
 
     # Training phase.
-    trainset = read_dataset(args, args.train_path)
-    instances_num = len(trainset)
+    bert_trainset = read_dataset(args, args.train_path)
+    instances_num = len(bert_trainset)
     batch_size = args.batch_size
 
     args.train_steps = int(instances_num * args.epochs_num / batch_size) + 1
@@ -333,18 +362,19 @@ def main():
 
     args.logger.info("Start training.")
     for epoch in range(1, args.epochs_num + 1):
-        random.shuffle(trainset)
-        src = torch.LongTensor([example[0] for example in trainset])
-        tgt = torch.LongTensor([example[1] for example in trainset])
-        seg = torch.LongTensor([example[2] for example in trainset])
+        random.shuffle(bert_trainset)
+        src = torch.LongTensor([example[0] for example in bert_trainset])
+        tgt = torch.LongTensor([example[1] for example in bert_trainset])
+        seg = torch.LongTensor([example[2] for example in bert_trainset])
+        kg = torch.LongTensor([example[3] for example in bert_trainset])
         if args.soft_targets:
-            soft_tgt = torch.FloatTensor([example[3] for example in trainset])
+            soft_tgt = torch.FloatTensor([example[4] for example in bert_trainset])
         else:
             soft_tgt = None
 
         model.train()
-        for i, (src_batch, tgt_batch, seg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, soft_tgt)):
-            loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, soft_tgt_batch)
+        for i, (src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch) in enumerate(batch_loader(batch_size, src, tgt, seg, kg, soft_tgt)):
+            loss = train_model(args, model, optimizer, scheduler, src_batch, tgt_batch, seg_batch, kg_batch, soft_tgt_batch)
             total_loss += loss.item()
             if (i + 1) % args.report_steps == 0:
                 args.logger.info("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
