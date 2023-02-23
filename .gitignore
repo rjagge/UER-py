@@ -138,3 +138,5 @@ dmypy.json
 # data
 corpora/*
 datasets/*
+models/*
+path

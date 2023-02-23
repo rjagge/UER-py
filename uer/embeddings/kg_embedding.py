@@ -2,8 +2,8 @@
 Date: 2022-12-30 15:04:40
 LastEditors: Jagger
 Description: 
-LastEditTime: 2023-02-10 16:27:10
-FilePath: /UER-py/uer/embeddings/kg_embedding.py
+LastEditTime: 2023-02-23 13:19:33
+FilePath: /research/UER-py/uer/embeddings/kg_embedding.py
 '''
 import torch.nn as nn
 import torch
@@ -20,7 +20,7 @@ class KgEmbedding(nn.Module):
         self.remove_embedding_layernorm = args.remove_embedding_layernorm
         self.dropout = nn.Dropout(args.dropout)
         # self.ent_embedding = nn.Embedding(vocab_size, args.emb_size)
-        ent_weight = torch.load(args.kg_emb_path).weight
+        ent_weight = torch.load(args.kg_emb_path)
         self.ent_embedding = nn.Embedding.from_pretrained(ent_weight, freeze=False)
         if not self.remove_embedding_layernorm:
             self.layer_norm = LayerNorm(args.kg_emb_size)

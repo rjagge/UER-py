@@ -23,7 +23,7 @@ from uer.utils.logging import init_logger
 from uer.utils.misc import pooling
 from uer.model_saver import save_model
 from uer.opts import finetune_opts, tokenizer_opts, adv_opts
-
+from torch.utils.tensorboard import SummaryWriter 
 
 class Classifier(nn.Module):
     def __init__(self, args):
@@ -266,6 +266,8 @@ def evaluate(args, dataset, report_log=True):
 
 
 def main():
+    writer = SummaryWriter('./path/to/log')
+    
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     finetune_opts(parser)
@@ -348,6 +350,7 @@ def main():
             total_loss += loss.item()
             if (i + 1) % args.report_steps == 0:
                 args.logger.info("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
+                writer.add_scalar('train_loss', total_loss / args.report_steps, global_step=None, walltime=None)
                 total_loss = 0.0
 
         result = evaluate(args, read_dataset(args, args.dev_path), False)

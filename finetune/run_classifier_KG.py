@@ -22,6 +22,7 @@ import random
 import argparse
 import torch
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter 
 
 uer_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(uer_dir)
@@ -289,6 +290,8 @@ def evaluate(args, dataset, report_log=True):
 
 
 def main():
+    writer = SummaryWriter('./path/to/log')
+
     parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
     finetune_opts(parser)
@@ -378,6 +381,7 @@ def main():
             total_loss += loss.item()
             if (i + 1) % args.report_steps == 0:
                 args.logger.info("Epoch id: {}, Training steps: {}, Avg loss: {:.3f}".format(epoch, i + 1, total_loss / args.report_steps))
+                writer.add_scalar('train_loss', total_loss / args.report_steps, global_step=None, walltime=None)
                 total_loss = 0.0
 
         result = evaluate(args, read_dataset(args, args.dev_path), False)
