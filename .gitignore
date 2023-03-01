@@ -133,3 +133,5 @@ dmypy.json
 *.DS_Store
 *.env/
 *.vscode/
+
+datasets/benchmark/*
