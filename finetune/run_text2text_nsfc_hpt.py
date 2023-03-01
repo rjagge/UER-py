@@ -11,7 +11,7 @@ from rouge import Rouge
 tencentpretrain_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(tencentpretrain_dir)
 
-from uer.model_saver import save_model
+# from uer.model_saver import save_modelg79
 from uer.decoders import *
 from uer.targets import *
 from finetune.run_classifier import *
@@ -59,18 +59,30 @@ class Text2text(torch.nn.Module):
             loss = self.target(hidden, tgt_out, seg)[0]
             return loss, output
 
+def process_prompt(task,line):
+    text, label = '',''
+    try:
+        discipline, title, keywords,abstract, first, second, third = line[:-1].split('\t')
+        if task == "hpt_lv1":
+            text = "文章的摘要是%s%s最符合的一级学科是" % (abstract,SEP_TOKEN)
+            label = first
+        elif task == "hpt_lv2":
+            text = "文章的摘要是%s%s已知该文章的一级学科是%s%s其%s%s下属的二级学科是" % (abstract,SEP_TOKEN,first,SEP_TOKEN,first,SEP_TOKEN)
+            label = second
+        elif task == "hpt_lv3":
+            text = "文章的摘要是%s%s已知该文章的一级学科是%s%s其%s%s下属的二级学科是%s%s其%s%s下属的三级学科是" % (
+                abstract,SEP_TOKEN,first,SEP_TOKEN,first,SEP_TOKEN,second,SEP_TOKEN,second,SEP_TOKEN)
+            label = third
+    except Exception as ex:
+        print(line)
+    return text, label
+   
 def read_dataset(args, path):
     dataset, columns = [], {}
     with open(path, mode="r", encoding="utf-8") as f:
         for line_id, line in enumerate(f):
 
-            line = line[:-1].split('\t')
-
-            if len(line) == 3:
-                text = line[0] + SEP_TOKEN + line[1]
-                label = line[2]
-            else:
-                text, label = line[0], line[1]
+            text, label = process_prompt(args.task, line)
 
             src = args.tokenizer.convert_tokens_to_ids([CLS_TOKEN] + args.tokenizer.tokenize(text) + [SEP_TOKEN])
             tgt_in = args.tokenizer.convert_tokens_to_ids([CLS_TOKEN] + args.tokenizer.tokenize(label) + [SEP_TOKEN])
@@ -262,6 +274,8 @@ def main():
                         help="Output sequence length.")
     parser.add_argument("--metrics", type=int, default=0,
                         help="0: Accuracy for classification. 1: Rouge-L for summarization, 2: Bpref. for keyword generation")
+    parser.add_argument("--task",type=str,
+                        help="task of the training prompts.")
 
     args = parser.parse_args()
 
