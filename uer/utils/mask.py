@@ -10,6 +10,7 @@ def mask_seq(src, tokenizer, whole_word_masking, span_masking, span_geo_prob, sp
             break
     src_no_pad = src[:i + 1]
 
+    # 这里会通过jieba的分词得到该文本的token_index，[[0,3],[3,2]] [[start_idx, length], [start_idx, length]]
     tokens_index, src_no_pad = create_index(src_no_pad, tokenizer, whole_word_masking, span_masking, span_geo_prob, span_max_length)
     if len(src_no_pad) < len(src):
         src = src_no_pad + (len(src) - len(src_no_pad)) * [PAD_ID]
@@ -32,6 +33,9 @@ def mask_seq(src, tokenizer, whole_word_masking, span_masking, span_geo_prob, sp
                 token = src[i + j]
                 tgt_mlm.append((i + j, token))
                 prob = random.random()
+                # 这里mask的机制和原生的bert有区别：
+                # 原生的mask是对该词组下的每一个idx进行单独的mask
+                # 这里的mask是对该词组做为一个整体，进行整体的替换
                 if prob < 0.8:
                     src[i + j] = vocab.get(MASK_TOKEN)
                 elif prob < 0.9:
@@ -83,6 +87,7 @@ def create_index(src, tokenizer, whole_word_masking, span_masking, span_geo_prob
     vocab = tokenizer.vocab
     PAD_ID = vocab.get(PAD_TOKEN)
     if whole_word_masking:
+        # 用来保存该句的index，和src的差别目前知道的是多一个index为101的[CLS]
         src_wwm = []
         src_length = len(src)
         has_cls, has_sep = False, False
@@ -93,14 +98,18 @@ def create_index(src, tokenizer, whole_word_masking, span_masking, span_geo_prob
             src = src[:-1]
             has_sep = True
         sentence = "".join(tokenizer.convert_ids_to_tokens(src)).replace('[UNK]', '').replace('##', '')
-        import jieba
-        wordlist = jieba.cut(sentence)
+        # 需要改动的代码就只有这一块，感觉有点简单哈哈哈
+        import jieba as seg
+        # seg = pkuseg.pkuseg(model_name = "default", user_dict = dict_path, postag = False)
+        wordlist = seg.cut(sentence)
         if has_cls:
             src_wwm += [vocab.get(CLS_TOKEN)]
+        # 使用jieba的分词结果，然后将原文本进行分词，用idx的方式保存下来
         for word in wordlist:
             position = len(src_wwm)
             src_wwm += tokenizer.convert_tokens_to_ids(tokenizer.tokenize(word))
             if len(src_wwm) < src_length:
+                # 每次保存一个词的起始位置和他的长度
                 tokens_index.append([position, len(src_wwm)-position])
         if has_sep:
             src_wwm += [vocab.get(SEP_TOKEN)]

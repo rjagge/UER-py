@@ -1,3 +1,10 @@
+'''
+Date: 2022-09-16 10:24:13
+LastEditors: Jagger
+Description: 
+LastEditTime: 2022-10-22 14:13:02
+FilePath: /UER-py/preprocess.py
+'''
 import argparse
 import six
 from packaging import version
@@ -40,6 +47,7 @@ def main():
     # Masking options.
     parser.add_argument("--dynamic_masking", action="store_true", help="Dynamic masking.")
     parser.add_argument("--whole_word_masking", action="store_true", help="Whole word masking.")
+    parser.add_argument("--dict_path", type=str, default="default", help="keyword dict path used for whole word masking.")
     parser.add_argument("--span_masking", action="store_true", help="Span masking.")
     parser.add_argument("--span_geo_prob", type=float, default=0.2,
                         help="Hyperparameter of geometric distribution for span masking.")

@@ -134,4 +134,13 @@ dmypy.json
 *.env/
 *.vscode/
 
+<<<<<<< HEAD
 datasets/benchmark/*
+=======
+
+# data
+corpora/*
+datasets/*
+models/*
+path
+>>>>>>> fcabf0e0e951e4986cdb64085bb181d7a5856c7d
